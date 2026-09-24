@@ -28,3 +28,7 @@ reports/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Claude Code / agent 工具的本地配置
+# 里面是会话级的临时授权记录和本机绝对路径，属于个人环境，不进公开仓
+.claude/

@@ -62,7 +62,7 @@
 
 ## 环境准备
 
-**Python 版本**：>= 3.10。官方 `anthropic` SDK 1.x 要求 3.10 起，低于这个版本会装到旧版，很多新特性（结构化输出、自适应思考）没有。
+**Python 版本**：>= 3.10。官方 `openai` SDK 3.x 要求 3.10 起，低于这个版本 pip 会给你装一个很老的版本，很多新特性没有。
 
 ```bash
 python --version
@@ -83,18 +83,58 @@ source .venv/Scripts/activate
 **装 SDK**：
 
 ```bash
-pip install anthropic
+pip install -r requirements.txt
 ```
 
-**API Key**：设置环境变量 `ANTHROPIC_API_KEY`。不要把 key 写进代码、不要提交到 git。
+> **国内网络注意**：直连 PyPI 装这一个包实测超过 7 分钟没装完，换清华镜像几秒完事。
+> ```bash
+> pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+> ```
+> 想一劳永逸就写进配置：
+> ```bash
+> pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+> ```
+
+**API Key**：设置环境变量 `DEEPSEEK_API_KEY`。不要把 key 写进代码、不要提交到 git。
 
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
+export DEEPSEEK_API_KEY="sk-..."
 ```
 
-如果所在网络环境需要走网关，SDK 支持 `ANTHROPIC_BASE_URL` 环境变量指向自己的端点，代码不用改。
+> ⚠️ **Python 不会自动读 `.env` 文件。** 光建一个 `.env` 填上 key 是**不生效**的，
+> 你得让这个变量真的出现在进程环境里。两种做法：
+>
+> - **A. 每次开终端手动 export**（上面那行）。零依赖，但每开一个新终端都要重来一次。
+> - **B. 装 `python-dotenv`**，在 `config.py` 顶部加一行 `load_dotenv()`，
+>   之后 `.env` 就自动生效了。多一个依赖，但一劳永逸。
+>
+> 目前仓库按 A 写（`config.py` 不做自动加载）。想换成 B 就自己加，两行的事。
 
-> 每个目录里都放一个 `.env.example` 记录需要哪些环境变量，真实的 `.env` 不要提交。
+**中文乱码修复**：Windows 终端默认用 GBK，Python 3.12 跟着走，于是 traceback 里的中文全变乱码。
+实测加上这个环境变量就好了：
+
+```bash
+export PYTHONUTF8=1
+```
+
+想一劳永逸（所有项目、所有终端都生效）：
+```bash
+setx PYTHONUTF8 1        # 之后要重开终端
+```
+
+**换个端点**：DeepSeek 有两个端点，我们用的是 OpenAI 格式那个：
+
+| 端点 | 格式 | 本项目 |
+|---|---|---|
+| `https://api.deepseek.com` | OpenAI 兼容 | ✅ 用这个 |
+| `https://api.deepseek.com/anthropic` | Anthropic 格式 | ❌ 不用 |
+
+前者是默认值，写在 `00-hello-llm/config.py` 的 `BASE_URL` 里。
+如果所在网络环境需要走自己的网关，改那一行就行。
+
+> 环境变量只有 `00-hello-llm/.env.example` 一份（记录需要哪些变量），
+> 后面所有章节都从 `00-hello-llm/config.py` import `client` 和 `MODEL`，不再各配一套。
+> 真实的 `.env` 不要提交。
 
 ---
 
@@ -102,12 +142,34 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 
 这些在后面的目录里会反复出现，先立在这里：
 
-1. **模型统一用 `claude-opus-5`**。写死在一个 `config.py` 或环境变量里，别散落在各处。
-2. **要流的就用流式**。`max_tokens` 大（比如 64000）时必须流式，否则会撞 HTTP 超时。
-3. **思考模式默认开着**，用 `thinking={"type": "adaptive"}`。注意 `budget_tokens` 这个参数在当前模型上已经被移除，传了会报 400 —— 老教程里到处都是它，别照抄。
-4. **别用 assistant prefill**（把 assistant 消息放最后来"引导开头"）。这个技巧在当前模型上已经移除，会报 400。老教程同样到处都在教。
-5. **拿到 tool 的输入一定要 `json.loads()`**，不要对原始字符串做匹配。
-6. **错误处理写具体异常链**，不要一把抓 `except Exception`。至少区分 `RateLimitError`（该退避重试）和 `APIStatusError` 400（重试没用）。
+1. **模型统一用 `deepseek-flash`**。写在 `00-hello-llm/config.py` 的 `MODEL` 里，别散落在各处。
+   想换 `deepseek-v4-pro` 只改这一行。
+2. **思考模式默认就是开的**，不用你传任何参数。默认 effort 是 `high`。
+   要关掉得显式传（OpenAI SDK 里必须塞进 `extra_body`）：
+   `extra_body={"thinking": {"type": "disabled"}}`。
+   **坑在这**：思考模式下 `temperature`、`presence_penalty`、`frequency_penalty`
+   这三个参数**静默失效** —— 官方原话是"不会报错，但也没有任何效果"。
+   `top_p` 反过来，**只在**思考模式下有效，且有效区间是 **0.95–1.0**
+   （传低于 0.95 会被当成 0.95）；非思考模式下它被固定成 1.0，你传的值直接忽略。
+   所以"调个温度让输出稳定点"在这个模型上是个假动作。
+3. **`reasoning_content` 的回传规则 —— 这条会真的报错，不是风格问题。**
+   请求里**带 `tools`** 时，所有历史轮次的 `reasoning_content` **必须完整回传**，
+   包括那些**没有发生工具调用**的轮次。官方原文：不回传，API 直接返回 **400**。
+   不带 `tools` 时则相反，可以不回传，传了也会被忽略。
+   最省事的正确写法是直接 append 整个 message 对象：
+   `messages.append(response.choices[0].message)` —— 它自带
+   `content` / `reasoning_content` / `tool_calls` 三样，别自己拼 dict 漏字段。
+4. **缓存是自动的，不用写代码**。DeepSeek 默认开着**磁盘前缀缓存**，命中就自动降价。
+   但**前缀必须完整匹配**才算一个独立单元 —— 所以把稳定的内容
+   （system、工具定义、长文档）放前面，会变的内容放后面。顺序反了就永远不命中。
+5. **拿到 `tool_calls` 的 `arguments` 一定要 `json.loads()`**。那是个**字符串**，
+   不是 dict；而且模型可能给你不合法 JSON，要处理解析失败。
+6. **错误处理写具体异常链**，不要一把抓 `except Exception`。
+   该重试的：`RateLimitError`(429)、`APIConnectionError`、`APITimeoutError`、
+   `InternalServerError`(5xx)。不该重试的：`BadRequestError`(400)、
+   `AuthenticationError`(401)、`NotFoundError`(404)、`UnprocessableEntityError`(422)。
+   注意它们**全都是 `APIStatusError` 的子类**，所以父类必须写在后面，否则子类分支永远进不去。
+   完整对照表见 `00-hello-llm/05_errors.py`。
 
 ---
 

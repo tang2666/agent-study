@@ -5,16 +5,17 @@
 这一层不是"学会调用接口"，而是**搞清楚一次请求里到底发生了什么**。后面所有 Agent 的问题，最终都会回到这几个概念上。
 
 - **无状态**：API 不记得你上一句说了什么。"多轮对话"是你每次把全部历史重新发一遍实现的。这一点如果没真正理解，写 Agent 时一定会出诡异的 bug
-- **token**：输入和输出都按 token 计费，上下文窗口也是按 token 算的。学会用 `count_tokens` 估算
-- **流式 vs 非流式**：什么时候必须流式
-- **采样参数**：当前模型上 `temperature` / `top_p` / `top_k` 已经移除了（传了会报 400），取而代之的是 `output_config.effort`。这是个重要的认知更新
-- **思考模式**：`thinking={"type": "adaptive"}`，以及为什么默认开着
+- **token**：输入和输出都按 token 计费，上下文窗口也是按 token 算的。注意 DeepSeek **没有** `count_tokens` 这类接口，只能靠官方离线 tokenizer 或字符比例估
+- **流式 vs 非流式**：流式里"思考过程"和"正文"是**两条独立的流**，不是一条
+- **采样参数**：`temperature` / `presence_penalty` / `frequency_penalty` 在思考模式下**不报错但完全无效**；`top_p` 反过来只在思考模式下有效。这是个重要的认知更新
+- **思考模式**：默认开着，用 `thinking` + `reasoning_effort` 控制
 - **结构化错误**：不同错误该怎么处理
 
 ## 要写的代码
 
 ```
 00-hello-llm/
+├── config.py             # 已给你（client + MODEL）
 ├── 01_first_call.py      # 最小可用调用
 ├── 02_streaming.py       # 流式输出
 ├── 03_multiturn.py       # 手动维护对话历史
@@ -28,8 +29,8 @@
 
 验收：
 - [ ] 能跑出结果
-- [ ] 打印完整的 `response`，肉眼看清 `content` / `usage` / `stop_reason` / `model` 这几个字段长什么样
-- [ ] 能说出 `stop_reason` 可能有哪些值，各自什么含义
+- [ ] 打印完整的 `response`，肉眼看清 `choices[0].message.content` / `reasoning_content` / `usage` / `finish_reason` / `model` 这几个字段长什么样
+- [ ] 能说出 `finish_reason` 的 6 个可能取值，各自什么含义
 
 **`02_streaming.py`**
 
@@ -37,8 +38,9 @@
 
 验收：
 - [ ] 文字是"流"出来的，不是一次性出现
-- [ ] 用 `.get_final_message()` 拿到完整消息，并打印它的 `usage`
-- [ ] 把 `max_tokens` 调到 64000 跑一次，**先不流式**，观察会发生什么（大概率超时），再改回流式
+- [ ] **把思考过程和正文分两行分别实时打印**，观察两者的先后顺序
+- [ ] 从最后一个 chunk 拿到 `usage`，并打印出来
+- [ ] 写完对比一次：同一句话，流式和非流式拿到的 `usage` 一样吗？
 
 **`03_multiturn.py`**
 
@@ -52,16 +54,17 @@
 
 **`04_tokens.py`**
 
-用 token 计数接口，在发请求前估算输入长度。
+在发请求前估算输入长度。
 
 验收：
-- [ ] 能对一段文本算出 token 数
-- [ ] 结合当前模型定价（`claude-opus-5` 输入 $5 / 输出 $25 每百万 token），算出这次调用大概花多少钱
+- [ ] 能对一段文本估算 token 数（用字符比例：英文 ≈ 0.3/字符，中文 ≈ 0.6/字符）
+- [ ] 拿真实响应的 `usage` 跟你的估算对比，看差多少
+- [ ] 结合 `deepseek-flash` 定价，算出这次调用花多少钱（注意**区分缓存命中/未命中**，差价 50 倍）
 - [ ] 跑 10 轮对话后，算出"因为历史不断变长，第 10 轮比第 1 轮贵了几倍"
 
 **`05_errors.py`**
 
-构造几种失败：key 错误、模型名错误、请求过大、触发限流。
+构造几种失败：key 错误、模型名错误、参数非法、触发限流。
 
 验收：
 - [ ] 用**具体的异常类**分别捕获，不要一个 `except Exception` 全接
@@ -71,15 +74,16 @@
 
 ## 刻意不用的东西
 
-- **不用任何框架**。这一层只用官方 `anthropic` SDK，看清楚原始形状
-- **不用 `langchain` / `openai` 兼容层**。先用原生 SDK 建立认知，兼容层会把这些概念藏起来
-- **不用 `temperature`**。当前模型上它已经没了，习惯 `effort` 这个新旋钮
+- **不用任何框架**。这一层只用官方 `openai` SDK，看清楚原始形状
+- **不用 `langchain` 之类的封装**。先用原生 SDK 建立认知，封装层会把这些概念藏起来
+- **不用 `response.choices[0].message.content` 之外的花哨取法**。这一章的目标就是把原始结构看清楚
 
 ## 踩坑提醒
 
-- 老教程里到处都是 `thinking={"type": "enabled", "budget_tokens": 10000}` —— **当前模型上会报 400**，用 `{"type": "adaptive"}` 代替
-- 老教程里也到处都在教 **assistant prefill**（把 assistant 消息放在 `messages` 最后来"引导"输出开头）—— **同样已移除，会报 400**。需要控制输出格式请用结构化输出（见 `01-prompting`）
-- 非流式请求的 `max_tokens` 别设太大，默认 16000 左右就够了；要更大就用流式
+- **`temperature` 是个假旋钮**。思考模式下你传它不会报错，但也完全没有效果。想"让输出更稳定"得用别的手段
+- **`max_tokens` 可以不传**。不传时默认 8K（非思考）/ 64K（思考），`reasoning_effort=max` 时 128K。上限 384K
+- **思考模式下 `content` 可能是空的**，而 `reasoning_content` 有一大段。这不是 bug，是模型还在想。写代码时别假设 `content` 一定非空
+- 老教程里的 `thinking={"type":"enabled","budget_tokens":10000}` 是 **Claude** 的写法，DeepSeek 不认 `budget_tokens`。DeepSeek 是 `reasoning_effort`
 
 ## 自测问题
 
@@ -87,5 +91,5 @@
 
 1. 为什么第二轮对话时你什么都没做，模型就知道上一轮说了什么？
 2. 对话到第 50 轮时，每次请求都会变贵。贵在哪里？有哪几种办法缓解（先各说一个方向就行）？
-3. `stop_reason` 是 `max_tokens` 代表什么？这时候的回复能直接用吗？
-4. 什么情况下必须用流式？
+3. `finish_reason` 是 `length` 代表什么？这时候的回复能直接用吗？
+4. 流式响应里，`reasoning_content` 和 `content` 为什么要分开处理？
