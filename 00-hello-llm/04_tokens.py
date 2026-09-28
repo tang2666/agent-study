@@ -79,15 +79,38 @@ PRICE = {
 }
 
 
+# 人民币汇率，粗估用，想改就改
+CNY_RATE = 7.1
+
+# 模拟时每轮都发这一句，固定不变，方便对比每轮的输入 token
+SIM_QUESTION = "再说一句关于 token 的话，不要重复上一轮的。"
+
+# CJK（中日韩）字符的 Unicode 区间。落在这里面的按 0.6/字符 算，其余按 0.3。
+CJK_RANGES = (
+    (0x3000, 0x303F),  # CJK 标点
+    (0x3040, 0x30FF),  # 日文平假名 + 片假名
+    (0x3400, 0x4DBF),  # CJK 扩展 A
+    (0x4E00, 0x9FFF),  # CJK 基本区（绝大多数汉字）
+    (0xAC00, 0xD7AF),  # 韩文谚文
+    (0xF900, 0xFAFF),  # CJK 兼容表意
+    (0xFF00, 0xFFEF),  # 全角字符
+)
+
+
+def _is_cjk(ch: str) -> bool:
+    code = ord(ch)
+    return any(lo <= code <= hi for lo, hi in CJK_RANGES)
+
+
 def estimate_tokens(text: str) -> int:
     """用字符比例粗估 token 数（英文 0.3/字符，中文 0.6/字符）。
 
-    提示：遍历字符，判断是不是 CJK 字符（中文/日文/韩文）。
-    判断方法之一是看 ord(ch) 落在几个 Unicode 区间里。
-    中文大致在 0x4E00-0x9FFF。日文假名、韩文谚文怎么算？
-    自己拿个主意，然后在下一节跟真实 usage 对一下你的估算准不准。
+    只是"估"。真实数字以 response.usage 为准 —— 官方自己也是这么说的。
     """
-    raise NotImplementedError("TODO: 实现 estimate_tokens()")
+    total = 0.0
+    for ch in text:
+        total += 0.6 if _is_cjk(ch) else 0.3
+    return round(total)
 
 
 def cost_of(usage) -> float:
@@ -96,27 +119,81 @@ def cost_of(usage) -> float:
     usage 是 response.usage 那个对象，从里面读上面列的字段。
     注意：流式和非流式拿 usage 的方式不同（见 02）。
     """
-    raise NotImplementedError("TODO: 实现 cost_of()")
+    # 这两个是 DeepSeek 的**自定义字段**，不在 OpenAI 的标准 usage 里。
+    # 用 getattr 取，万一哪天没有就退回 0，不至于直接崩。
+    hit = getattr(usage, "prompt_cache_hit_tokens", 0) or 0
+    miss = getattr(usage, "prompt_cache_miss_tokens", 0) or 0
+    if hit == 0 and miss == 0:
+        # 没有任何缓存信息时，保守一点，输入全按未命中算（贵的那档）
+        miss = usage.prompt_tokens
+
+    return (
+        hit * PRICE["cache_hit"]
+        + miss * PRICE["cache_miss"]
+        + usage.completion_tokens * PRICE["output"]
+    ) / 1_000_000
 
 
 def simulate_rounds(n: int = 10) -> None:
     """模拟 n 轮对话，打印每轮的输入 token 数和人民币/美元成本。
 
-    这是这一节的**重头戏**。你要做的：
-      1. 从空 messages 开始，循环 n 轮
-      2. 每轮发一个固定的、短的问题（比如"再说一句关于 token 的话"）
-      3. 每轮把回复 append 回 messages（就是 03 那张做法）
-      4. 每轮打印：轮次、messages 长度、本次 prompt_tokens、
-         其中命中缓存的多少、成本、累计成本
-      5. 算出来：第 10 轮的输入 token 数大概是第 1 轮的几倍？
-
-    观察重点：因为每轮都要重发全部历史，输入 token 随轮次增长是
-    **平方级**的（第 k 轮有 ~k 条消息，总共 ~n²/2）。
-    同时观察 prompt_cache_hit_tokens —— 大部分历史应该都是命中的。
+    重头戏：看输入 token 怎么随轮次涨。
+    因为每轮都要重发全部历史，第 k 轮塞进去 2k-1 条消息，
+    累计输入 ≈ n²/2 —— **平方级增长**。
     """
-    raise NotImplementedError("TODO: 实现 simulate_rounds()")
+    question = SIM_QUESTION
+
+    messages: list = []
+    total_cost = 0.0
+    first_prompt = 0
+    last_prompt = 0
+
+    header = (
+        f"{'轮次':>4} {'消息数':>6} {'输入':>7} {'命中':>7} "
+        f"{'未命中':>7} {'输出':>6} {'本轮$':>10} {'累计$':>10}"
+    )
+    print(header)
+    print("-" * len(header))
+
+    for r in range(1, n + 1):
+        messages.append({"role": "user", "content": question})
+
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+        )
+
+        usage = response.usage
+        cost = cost_of(usage)
+        total_cost += cost
+
+        hit = getattr(usage, "prompt_cache_hit_tokens", 0) or 0
+        miss = getattr(usage, "prompt_cache_miss_tokens", 0) or 0
+        if r == 1:
+            first_prompt = usage.prompt_tokens
+        last_prompt = usage.prompt_tokens
+
+        print(
+            f"{r:>4} {len(messages):>6} {usage.prompt_tokens:>7} {hit:>7} "
+            f"{miss:>7} {usage.completion_tokens:>6} "
+            f"{cost:>10.6f} {total_cost:>10.6f}"
+        )
+
+        messages.append(response.choices[0].message)
+
+    print("-" * len(header))
+    print(f"累计成本：${total_cost:.6f}  ≈ ¥{total_cost * CNY_RATE:.4f}")
+    print(
+        f"输入 token：第 1 轮 {first_prompt} → 第 {n} 轮 {last_prompt}，"
+        f"涨了 {last_prompt / first_prompt:.1f} 倍"
+    )
 
 
 if __name__ == "__main__":
-    print("估算示例：", estimate_tokens("hello world 你好世界"))
+    print(f"估算示例：hello world 你好世界 → {estimate_tokens('hello world 你好世界')} token")
+    print(f"下面每轮发的问题：{SIM_QUESTION!r}")
+    print(f"纯文本估算是 {estimate_tokens(SIM_QUESTION)} token，"
+          f"跟下表第 1 轮的「输入」对比一下，看差多少。\n")
     simulate_rounds(10)

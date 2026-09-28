@@ -62,65 +62,66 @@
 
 ## 环境准备
 
-**Python 版本**：>= 3.10。官方 `openai` SDK 3.x 要求 3.10 起，低于这个版本 pip 会给你装一个很老的版本，很多新特性没有。
+依赖管理用 **uv**：`pyproject.toml` 写依赖，`uv.lock` 锁版本，`.venv` 由 uv 管。
+
+**Python 版本**：>= 3.10。官方 `openai` SDK 3.x 要求 3.10 起，低于这个版本会给你装一个很老的版本，很多新特性没有。
 
 ```bash
-python --version
+python --version     # 实测 3.12.2
 ```
 
-**虚拟环境**（推荐 `uv`，不习惯就用 `venv`）：
+**装 uv**（Windows Git Bash，走清华镜像，几秒）：
 
 ```bash
-# 方式一：uv（快）
-uv venv
-source .venv/Scripts/activate      # Windows Git Bash
-
-# 方式二：venv
-python -m venv .venv
-source .venv/Scripts/activate
+python -m pip install uv -i https://pypi.tuna.tsinghua.edu.cn/simple
+uv --version
 ```
 
-**装 SDK**：
+**建环境 + 装依赖**：
 
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
-> **国内网络注意**：直连 PyPI 装这一个包实测超过 7 分钟没装完，换清华镜像几秒完事。
-> ```bash
-> pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-> ```
-> 想一劳永逸就写进配置：
-> ```bash
-> pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
-> ```
+`uv sync` 会建好 `.venv`，按 `uv.lock` 装齐所有依赖（含 dev 工具 ruff）。
 
-**API Key**：设置环境变量 `DEEPSEEK_API_KEY`。不要把 key 写进代码、不要提交到 git。
+**以后加依赖不要用 `pip install`**，统一走 uv，它会同时更新 `pyproject.toml` 和 `uv.lock`：
 
 ```bash
-export DEEPSEEK_API_KEY="sk-..."
+uv add <包>            # 运行时依赖 → [project] dependencies
+uv add --dev <包>      # 开发工具   → [dependency-groups] dev
+uv remove <包>
 ```
 
-> ⚠️ **Python 不会自动读 `.env` 文件。** 光建一个 `.env` 填上 key 是**不生效**的，
-> 你得让这个变量真的出现在进程环境里。两种做法：
->
-> - **A. 每次开终端手动 export**（上面那行）。零依赖，但每开一个新终端都要重来一次。
-> - **B. 装 `python-dotenv`**，在 `config.py` 顶部加一行 `load_dotenv()`，
->   之后 `.env` 就自动生效了。多一个依赖，但一劳永逸。
->
-> 目前仓库按 A 写（`config.py` 不做自动加载）。想换成 B 就自己加，两行的事。
+`uv.lock` **要提交进 git** —— 它保证换台机器 `uv sync` 装出一模一样的环境。
 
-**中文乱码修复**：Windows 终端默认用 GBK，Python 3.12 跟着走，于是 traceback 里的中文全变乱码。
-实测加上这个环境变量就好了：
+**跑脚本**（不用先 activate，`uv run` 自己管环境）：
 
 ```bash
-export PYTHONUTF8=1
+uv run 00-hello-llm/01_first_call.py
 ```
 
-想一劳永逸（所有项目、所有终端都生效）：
+> **国内网络**：uv 的镜像配在**本机全局**（`%APPDATA%\uv\uv.toml`），所有 uv 项目都走清华源，
+> 仓库里不用再写一遍。只有「装 uv 本身」那一步需要手动加 `-i`。
+
+**API Key**：从模板复制一份，填上真实 key。不要把 key 写进代码、不要提交到 git。
+
 ```bash
-setx PYTHONUTF8 1        # 之后要重开终端
+cp .env.example .env
+# 然后编辑 .env，把 DEEPSEEK_API_KEY 换成 platform.deepseek.com 拿到的真实 key
 ```
+
+`.env` 已被 `.gitignore` 屏蔽，不会进 git。**不用再 export** ——
+`00-hello-llm/config.py` 顶部调了 `load_dotenv()`，会自动加载**仓库根目录**的 `.env`
+（用绝对路径定位，所以从哪个目录运行都找得到）。
+
+**中文乱码**：Windows 终端默认 GBK，而 Git Bash / PyCharm 的终端是 UTF-8，于是 Python
+打的中文（包括报错信息）全变乱码。**这个已经修好了，你不用做任何事** ——
+`00-hello-llm/config.py` 开头把 stdout / stderr 强制成了 UTF-8。
+
+> **为什么用代码而不是环境变量**：`PYTHONUTF8=1` 必须在 Python **启动前**就存在，
+> 而 `config.py` 是被 import 的，运行时再设来不及。代码里 `reconfigure` 没这个限制，
+> 而且跟着仓库走，换台机器也自动生效。
 
 **换个端点**：DeepSeek 有两个端点，我们用的是 OpenAI 格式那个：
 
@@ -132,7 +133,7 @@ setx PYTHONUTF8 1        # 之后要重开终端
 前者是默认值，写在 `00-hello-llm/config.py` 的 `BASE_URL` 里。
 如果所在网络环境需要走自己的网关，改那一行就行。
 
-> 环境变量只有 `00-hello-llm/.env.example` 一份（记录需要哪些变量），
+> 环境变量清单只有根目录的 `.env.example` 一份（记录需要哪些变量），
 > 后面所有章节都从 `00-hello-llm/config.py` import `client` 和 `MODEL`，不再各配一套。
 > 真实的 `.env` 不要提交。
 
@@ -170,6 +171,44 @@ setx PYTHONUTF8 1        # 之后要重开终端
    `AuthenticationError`(401)、`NotFoundError`(404)、`UnprocessableEntityError`(422)。
    注意它们**全都是 `APIStatusError` 的子类**，所以父类必须写在后面，否则子类分支永远进不去。
    完整对照表见 `00-hello-llm/05_errors.py`。
+
+---
+
+## 官方文档在哪
+
+这个仓库不给答案，所以「接口长什么样」得自己去查。三个来源，可信度从高到低：
+
+**1. 本机装好的 SDK 源码 —— 最准**
+
+仓库锁的是 `openai==3.19.2`，网上教程的版本不一定对得上。要确认某个参数或异常类，直接读本机源码：
+
+```bash
+uv run python -c "import openai, os; print(os.path.dirname(openai.__file__))"
+```
+
+最常翻的两个文件：
+
+- `_exceptions.py` —— 异常类层次（`05_errors.py` 那张继承表就是从这读出来的）
+- `resources/chat/completions/completions.py` —— `create()` 的完整签名（实测 42 个参数）
+
+**2. DeepSeek 官方文档**
+
+| 要查什么 | 地址 |
+|---|---|
+| Chat Completions 全部参数、响应结构、`finish_reason` 取值 | https://api-docs.deepseek.com/api/create-chat-completion/ |
+| 7 个错误码（400 / 401 / 402 / 422 / 429 / 500 / 503） | https://api-docs.deepseek.com/quick_start/error_codes |
+| 思考模式（`thinking` / `reasoning_effort`） | https://api-docs.deepseek.com/guides/thinking_mode |
+| 定价（含缓存命中差价） | https://api-docs.deepseek.com/quick_start/pricing |
+| 入口 / 首次调用 | https://api-docs.deepseek.com/ |
+
+**3. openai SDK 仓库**
+
+- 源码：https://github.com/openai/openai-python
+- Chat API reference：https://platform.openai.com/docs/api-reference/chat/create
+
+> 每章 `.py` 文件开头都有一段 `--- 关键 API ---`，把这一章用得上的部分摘了出来。
+> 它能帮你起步，但**细节仍以官方文档和实测为准** —— 尤其是少见分支，
+> 比如 `finish_reason=aborted`、`402` 落到 `APIStatusError` 这种。
 
 ---
 

@@ -9,8 +9,26 @@ https://api.deepseek.com/anthropic，本项目不走那条。）
 """
 
 import os
+import sys
+from pathlib import Path
 
+from dotenv import load_dotenv
 from openai import OpenAI
+
+# ---------------------------------------------------------------- 编码
+# Windows 终端默认 GBK，而 Git Bash / PyCharm / VS Code 的终端都是 UTF-8，
+# 于是 Python 打的中文（包括报错信息）全变乱码。
+# 这里把标准输出 / 标准错误流强制成 UTF-8，和终端对齐。
+#
+# 必须在**打印任何东西之前**执行，所以放在模块最上面。
+# 之所以不用环境变量 PYTHONUTF8=1：那个必须在 Python 启动前就存在，
+# 而本文件是被 import 的，运行时再设已经来不及。
+#
+# hasattr 判断是必要的：stdout 不一定是文本流 ——
+# 重定向到管道、pytest 的捕获、pythonw 下可能是 None，这些情况直接跳过。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8")
 
 # ---------------------------------------------------------------- 模型
 # 官方定价页（api-docs.deepseek.com/quick_start/pricing）当前的两个模型：
@@ -25,17 +43,20 @@ MODEL = "deepseek-flash"
 BASE_URL = "https://api.deepseek.com"
 
 # ---------------------------------------------------------------- client
-# 显式检查一下，省得后面抛一个看不懂的错。
-# 这里**不会**自动读 .env 文件 —— 环境变量得真的存在。
-# 要不要用 python-dotenv 让 .env 生效，见根 README 的说明。
+# .env 在**仓库根目录**（和 pyproject.toml 同级）。
+# 这里显式给绝对路径：无论从哪个目录运行、用 `uv run` 还是 IDE 点运行，
+# 都找得到，不依赖 python-dotenv 的自动搜索。
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+# 显式检查一下，省得后面抛一个看不懂的 401。
 _api_key = os.environ.get("DEEPSEEK_API_KEY")
 
-if not _api_key:
+if not _api_key or _api_key == "sk-...":
     raise RuntimeError(
-        "没找到环境变量 DEEPSEEK_API_KEY。\n"
-        "先在当前终端里设置（Git Bash）：\n"
-        '    export DEEPSEEK_API_KEY="sk-..."\n'
-        "注意：光把 key 写进 .env 文件是不生效的，Python 不会自动读它。"
+        "没找到有效的 DEEPSEEK_API_KEY。\n"
+        "把仓库根目录的 .env.example 复制成 .env，填上真实 key：\n"
+        "    cp .env.example .env\n"
+        "（key 缺失、或还是占位符 sk-...，都会到这里。）"
     )
 
 # 这个 client 只建一次，全项目共用。

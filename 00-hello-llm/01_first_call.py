@@ -48,7 +48,6 @@
   而 reasoning_effort 不一样 —— 它是 OpenAI 后来收编的标准参数，
   所以能直接当关键字参数传，不用包 extra_body。
 """
-
 from config import MODEL, client
 
 
@@ -62,10 +61,25 @@ def ask(question: str) -> None:
       4. 再把 usage 整个打印出来
       5. 观察：reasoning_content 和 content 哪个先出现？内容上有什么区别？
 
-    小提示：reasoning_content 在非思考模式下是 None，打印前先判断一下，
-    不然会打出个 None 让你以为出错了。
+    小提示：非思考模式下 message 上**根本没有** reasoning_content 这个属性，
+    直接访问会 AttributeError（**不是 None**）。要安全取值就用
+    getattr(message, "reasoning_content", None)。
+    （只有**流式**的 chunk 里它才是显式的 null，两者不一样。）
     """
-    raise NotImplementedError("TODO: 实现 ask()，参考本文件顶部的关键 API")
+
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": question}],
+        reasoning_effort="high",
+        extra_body={"thinking": {"type": "enabled"}},
+    )
+
+    print(response.model_dump_json(indent=2))
+    print(response.choices[0].message.content)
+    print(response.choices[0].message.reasoning_content)
+    print(response.choices[0].finish_reason)
+    print(response.usage)
+    print(response.model)
 
 
 if __name__ == "__main__":

@@ -102,17 +102,29 @@
     ContentFilterFinishReasonError （内容被过滤）
   它们接不到 APIStatusError，要用就拿 OpenAIError 接。
 
---- 怎么构造这几种失败 ---
+--- 怎么构造这几种失败（2026-09-27 实测，openai 3.19.2 + DeepSeek）---
 
-  - AuthenticationError ：把 DEEPSEEK_API_KEY 改成一个错的
-  - BadRequestError(400) ：传一个明显非法的参数，比如 messages 里少 role
-  - UnprocessableEntityError(422)：传个类型不对的参数值
-  - NotFoundError(404)  ：把 model 改成一个不存在的名字
-  - RateLimitError(429) ：短期连发大量并发请求
-  - APIConnectionError  ：把 BASE_URL 指向一个连不上的地址
-  - 402                 ：这个不建议专门去试（要真把余额花光）
+  **注意：下面有两条和「直觉映射」对不上，是这章最值钱的发现。**
 
-  能构造出来的都亲手跑一次，看真实报错长什么样。跑到了，这一章才算做完。
+    AuthenticationError(401)        ：把 API Key 改成一个错的
+    BadRequestError(400)            ：**模型名写错**。DeepSeek 用的是 400，
+                                      不是常见的 404 —— SDK 里根本没有
+                                      NotFoundError 给你接，别照抄别家的表
+    UnprocessableEntityError(422)   ：**这一档特别宽**，以下全都落 422：
+                                        · 消息缺 role / content
+                                        · messages 给成字符串（类型就不对）
+                                        · 参数值非法，比如 max_tokens=-1
+                                      所以「缺字段」并不总是 400
+    APIConnectionError              ：把 BASE_URL 指向一个连不上的地址
+                                      （注意它**没有** status_code，是 None）
+    TypeError                       ：参数名写错。请求根本没发出去，
+                                      不在这条异常链上，重试毫无意义
+    RateLimitError(429)             ：短期连发大量并发请求（未实测）
+    APITimeoutError                 ：服务端迟迟不响应（未实测）
+    402                             ：不建议专门去试（要真把余额花光）
+
+  结论：**别背「哪个错误是 400」这种表，动手跑一遍。**
+  文档给的是 SDK 的「状态码 → 异常类」映射，不等于「哪种错误 → 状态码」。
 
 --- 重试的两条铁律 ---
 
@@ -123,33 +135,121 @@
 
 import time
 
-from config import MODEL, client
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AuthenticationError,
+    BadRequestError,
+    InternalServerError,
+    OpenAI,
+    RateLimitError,
+    UnprocessableEntityError,
+)
+
+from config import BASE_URL, MODEL, client
+
+# 「重试有意义」的一组：都是临时性故障，等一会儿可能就好了。
+# 这四个里 RateLimitError 和 InternalServerError 是 APIStatusError 的**子类**，
+# 所以这个元组必须写在 `except APIStatusError` 前面，否则会被父类那一支整个吞掉。
+RETRYABLE_ERRORS = (
+    RateLimitError,
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+)
 
 
 def call_with_retry(messages: list, max_retries: int = 3) -> object:
     """带指数退避的调用。
 
-    你要做的：
-      1. 写成上面那条「最具体 → 最宽泛」的异常链
-      2. 只有该重试的异常才重试（限流、网络、超时、5xx）
-      3. 退避间隔 2 ** attempt 秒（1s, 2s, 4s）
-      4. 4xx 直接抛出，不要浪费时间重试
-      5. 每次重试打印一行日志，说明"第几次重试、因为什么、等多久"
-      6. 记得 max_retries 用完就抛，别写成死循环
+    退避节奏 1s → 2s → 4s（2 ** attempt）。用固定间隔会加剧雪崩：
+    服务端已经过载了，所有客户端还同步地每秒捶一次。
     """
-    raise NotImplementedError("TODO: 实现 call_with_retry()")
+    # attempt 取 0..max_retries，即「初次尝试 + max_retries 次重试」
+    for attempt in range(max_retries + 1):
+        try:
+            return client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                reasoning_effort="high",
+                extra_body={"thinking": {"type": "enabled"}},
+            )
+
+        # 临时性故障 → 退避重试
+        except RETRYABLE_ERRORS as e:
+            if attempt == max_retries:
+                # 次数用完还是失败，原样抛出去（裸 raise），别写成死循环
+                print(f"× 已重试 {max_retries} 次仍失败，放弃：{type(e).__name__}")
+                raise
+            wait_seconds = 2**attempt
+            print(
+                f"↻ 第 {attempt + 1}/{max_retries} 次重试："
+                f"{type(e).__name__} → 等 {wait_seconds}s"
+            )
+            time.sleep(wait_seconds)
+
+        # 其余 HTTP 错误（400/401/402/404/422…）→ 代码或参数问题，重试无用
+        except APIStatusError as e:
+            if e.status_code == 402:
+                # 402 没有专属异常类，会落到 APIStatusError，只能自己看状态码
+                print("！余额不足（402）：https://platform.deepseek.com")
+            print(f"× 不可重试（{e.status_code} {type(e).__name__}）")
+            raise
 
 
 def break_it() -> None:
-    """把上面几种失败各构造一次，观察真实报错。
+    """把各种失败各构造一次，打印异常类名、status_code 和 message。"""
+    messages = [{"role": "user", "content": "你好"}]
 
-    打印每种情况捕获到的：异常类名、message、status_code（如果有）。
+    # ① 401 —— API Key 是错的。用一个单独的 client，不动全局那个
+    try:
+        bad_key_client = OpenAI(api_key="sk-this-key-is-wrong", base_url=BASE_URL)
+        bad_key_client.chat.completions.create(model=MODEL, messages=messages)
+    except AuthenticationError as e:
+        print(f"① {type(e).__name__}  status_code={e.status_code}\n   {e}\n")
 
-    建议一种一种来 —— 把不跑的注释掉，跑完一种再换下一种，
-    不然满屏报错看不清。跑完把输出记到 99-sandbox/ 或 90-notes/ ——
-    这些报错以后你会反复见到。
-    """
-    raise NotImplementedError("TODO: 实现 break_it()")
+    # ② 模型名不存在 —— 实测是 400，不是 404
+    try:
+        client.chat.completions.create(model="deepseek-not-exist", messages=messages)
+    except BadRequestError as e:
+        print(f"② {type(e).__name__}  status_code={e.status_code}\n   {e}\n")
+
+    # ③ 消息缺 content 字段 —— 实测 422，就是 03_multiturn 撞过的那个
+    try:
+        client.chat.completions.create(model=MODEL, messages=[{"role": "user"}])
+    except UnprocessableEntityError as e:
+        print(f"③ {type(e).__name__}  status_code={e.status_code}\n   {e}\n")
+
+    # ④ messages 的整体类型就不对 —— 也是 422
+    try:
+        client.chat.completions.create(model=MODEL, messages="你好")
+    except UnprocessableEntityError as e:
+        print(f"④ {type(e).__name__}  status_code={e.status_code}\n   {e}\n")
+
+    # ⑤ 参数值超出合法范围 —— 还是 422
+    try:
+        client.chat.completions.create(model=MODEL, messages=messages, max_tokens=-1)
+    except UnprocessableEntityError as e:
+        print(f"⑤ {type(e).__name__}  status_code={e.status_code}\n   {e}\n")
+
+    # ⑥ 连不上 —— 注意 APIConnectionError 没有 status_code 这个属性
+    try:
+        dead_client = OpenAI(api_key="sk-whatever", base_url="http://127.0.0.1:1")
+        dead_client.chat.completions.create(model=MODEL, messages=messages)
+    except APIConnectionError as e:
+        status = getattr(e, "status_code", None)
+        print(f"⑥ {type(e).__name__}  status_code={status}\n   {e}\n")
+
+    # ⑦ 参数名写错 —— 请求根本没发出去，抛的是 TypeError，不在 openai 异常链上
+    try:
+        client.chat.completions.create(
+            model=MODEL, messages=messages, not_a_real_param=1
+        )
+    except TypeError as e:
+        print(f"⑦ {type(e).__name__}（客户端错误，请求没发出去）\n   {e}\n")
+
+    print("没实测的：429 限流、超时（构造成本高）；402（要真把余额花光）")
 
 
 if __name__ == "__main__":

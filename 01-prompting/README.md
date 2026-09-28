@@ -1,5 +1,9 @@
 # 01 — 提示词 & 结构化输出
 
+> **接口去哪查**：本目录每个 `.py` 文件**顶部的 docstring**里都有一段 `--- 关键 API ---`，
+> 写了这一节用得上的调用形状、字段和坑。这份 README 只给要求和验收标准，不给接口。
+> 官方文档入口见根 README 的「官方文档在哪」。
+
 ## 要搞懂什么
 
 核心目标只有一个：**让 LLM 的输出变成程序能可靠使用的数据**。
@@ -44,7 +48,9 @@
 验收：
 - [ ] 用 `response_format={"type": "json_object"}` 强制格式，而不是只在提示词里写"请返回 JSON"
 - [ ] **提示词里必须出现 "json" 这个词**，并且给一个期望格式的**例子**。
-      官方明确要求这两点，不给的话模型可能一直输出空白直到撞上限
+      官方明确要求这两点，不给的话请求**直接 400**，报错原文：
+      `Prompt must contain the word 'json' in some form to use 'response_format' of type 'json_object'.`
+      （不是「一直输出空白直到撞上限」）
 - [ ] 拿到的 `message.content` 是**字符串**，**要自己 `json.loads()`**
       （注意：这跟 Claude 的结构化输出不一样，Claude 那边能直接给你解析好的对象。
       DeepSeek 只保证"是合法 JSON 字符串"）

@@ -1,0 +1,32 @@
+[project]
+name = "agent-practice"
+version = "0.1.0"
+description = "Agent 开发学习路线：手写实现优先，框架放最后"
+requires-python = ">=3.10"
+
+# 运行时依赖。用 `uv add <包>` 改这里，别手写。
+dependencies = [
+    "openai==3.19.2",   # 走 OpenAI 兼容接口连 DeepSeek
+    "python-dotenv>=1.0",  # 让 .env 自动生效，省得每开一个终端 export 一次
+]
+
+# 开发工具。用 `uv add --dev <包>` 改这里。
+[dependency-groups]
+dev = ["ruff>=0.14"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+# 章节脚本靠 `from config import ...` 互相引用，不是包，别让 ruff 当成 import 错误
+[tool.ruff.lint.isort]
+known-first-party = ["config"]
+
+[tool.ruff.lint.per-file-ignores]
+# 章节练习脚本是骨架（函数体是 raise NotImplementedError），
+# 顶部的 import 是留给学习者填 TODO 时用的，没实现前必然显示"未使用"。
+# 关掉 F401，否则 `ruff check --fix` 会把这些 import 删掉，正好删掉你要用的东西。
+"*/[0-9]*.py" = ["F401"]

@@ -60,8 +60,32 @@ def chat_loop() -> None:
       5. 每轮打印 len(messages)，看清它是怎么涨的
       6. 做完上面的"必做的实验"
     """
-    raise NotImplementedError("TODO: 实现 chat_loop()")
+
+    messages = []
+    steps = 0
+    while (True):
+        steps += 1
+        if steps > 10:
+            print("已经超过十轮，该结束了")
+            return
+        message = input()
+        if message == "exit":
+            return
+        messages.append({"role": "user", "content": message})
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+        )
+        print(response.choices[0].message.content)
+        print(f"len(messages)={len(messages)}")
+        messages.append(response.choices[0].message)
 
 
 if __name__ == "__main__":
     chat_loop()
+
+"""
+api接口的对面是生成式大模型，仅通过我们发的消息推断，本身没有记忆功能，当我们不把历史对话发给他的时候，它本身是不记得我们之前的问题的，所以回答的问题往往不尽如人意
+"""

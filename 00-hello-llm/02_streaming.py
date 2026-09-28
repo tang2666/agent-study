@@ -68,7 +68,44 @@ def stream_answer(question: str) -> None:
 
     见 README 的验收标准（详见 ./README.md）。
     """
-    raise NotImplementedError("TODO: 实现 stream_answer()")
+    stream = client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": question}],
+        reasoning_effort="high",
+        extra_body={"thinking": {"type": "enabled"}},
+        stream=True,
+    )
+
+    usage = None
+    phase = None  # "reasoning" / "content"，用来知道什么时候该换行
+
+    # 只能有一个 for：stream 是一次性迭代器，跑完就空了，
+    # 再写第二个 for 一个元素都拿不到（这就是之前正文没输出的原因）。
+    for chunk in stream:
+        # usage 只在最后一个 chunk 上，所以要一路接住
+        if chunk.usage is not None:
+            usage = chunk.usage
+
+        delta = chunk.choices[0].delta
+
+        # 两个字段各自判断：每个 chunk 只有一边有值，另一边是 None
+        if delta.reasoning_content:
+            if phase != "reasoning":
+                print("[思考] ", end="", flush=True)
+                phase = "reasoning"
+            print(delta.reasoning_content, end="", flush=True)
+
+        if delta.content:
+            if phase != "content":
+                # 正文开始 = 思考流完了，换一行再流
+                if phase is not None:
+                    print()
+                print("[正文] ", end="", flush=True)
+                phase = "content"
+            print(delta.content, end="", flush=True)
+
+    print()  # 收尾换行
+    print(f"\n流式 usage：{_fmt_usage(usage)}")
 
 
 def nonstream_for_comparison(question: str) -> None:
@@ -76,11 +113,33 @@ def nonstream_for_comparison(question: str) -> None:
 
     见 README 的验收标准（详见 ./README.md）。
     """
-    raise NotImplementedError("TODO: 实现 nonstream_for_comparison()")
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": question}],
+        reasoning_effort="high",
+        extra_body={"thinking": {"type": "enabled"}},
+    )
+
+    print(f"[正文] {response.choices[0].message.content}")
+    print(f"\n非流式 usage：{_fmt_usage(response.usage)}")
+
+
+def _fmt_usage(usage: object) -> str:
+    """把 usage 压成一行，方便流式/非流式对着看。"""
+    if usage is None:
+        return "None（没拿到）"
+    return (
+        f"prompt={usage.prompt_tokens} "
+        f"completion={usage.completion_tokens} "
+        f"total={usage.total_tokens}"
+    )
 
 
 if __name__ == "__main__":
-    stream_answer("用一句话解释什么是 token。")
-    print()
-    print("=== 下面是同问题的非流式对照 ===")
-    nonstream_for_comparison("用一句话解释什么是 token。")
+    question = "用一句话解释什么是 token。"
+
+    print("=== 流式 ===")
+    stream_answer(question)
+
+    print("\n=== 下面是同问题的非流式对照 ===")
+    nonstream_for_comparison(question)
