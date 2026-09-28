@@ -21,9 +21,11 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
-# 章节脚本靠 `from config import ...` 互相引用，不是包，别让 ruff 当成 import 错误
+# 章节脚本靠 `from config import ...` 互相引用，不是包，别让 ruff 当成第三方。
+# 每章自己那套本地模块（tools / executors / agent ...）都要登记在这里，
+# 不然 ruff 会把它们和 config 拆成两组，I001 一直报。
 [tool.ruff.lint.isort]
-known-first-party = ["config"]
+known-first-party = ["config", "tools", "executors"]
 
 [tool.ruff.lint.per-file-ignores]
 # 章节练习脚本是骨架（函数体是 raise NotImplementedError），
