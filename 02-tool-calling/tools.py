@@ -69,32 +69,71 @@
 
   2. `tools` 本身不影响这一点：带不带 tools，思考都是默认开着的。
 
---- 你要做的 ---
+--- 三个工具都已经写好了 ---
 
-  把下面那个列表填成三个真正的工具定义。
+  这一节的任务是**跑通往返**，不是设计 API。所以下面的 TOOLS 直接能用。
+  但每条字段都要看懂 —— 03 / 04 要用你自己改它们：
+
+      "name"        → 必须和 executors.py 里 EXECUTORS 的 key 一致
+      "description" → 给模型看的"什么时候用"，是模型决定调不调它的唯一依据
+      "parameters"  → JSON Schema；里面的 properties 名字要和 Python 函数的
+                      形参名一致（因为脚本是 `fn(**args)` 调的）
 """
 
-# 三个工具的 schema。
-#
-# 下面是**注释掉的模板** —— 形状照它写，内容自己定，写完把注释去掉。
-# 三个都写在这个列表里，脚本统一 `from tools import TOOLS`。
+# 三个工具。形状固定是 {"type": "function", "function": {...}}，外面那层不能省。
 TOOLS: list[dict] = [
-    # {
-    #     "type": "function",
-    #     "function": {
-    #         "name": "calculate",
-    #         "description": "计算一个数学表达式。当用户需要做算术、比较数字大小时使用。",
-    #         "parameters": {
-    #             "type": "object",
-    #             "properties": {
-    #                 "expression": {
-    #                     "type": "string",
-    #                     "description": "要计算的表达式，如 '20+15-5'",
-    #                 }
-    #             },
-    #             "required": ["expression"],
-    #         },
-    #     },
-    # },
-    # ... 再写两个：get_weather / read_file
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": (
+                "查询指定城市当前的实时天气。当用户询问某地天气、气温、"
+                "是否下雨、要不要带伞时使用。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string",
+                        "description": "城市名，中文，如 '北京'（带不带'市'都行）",
+                    }
+                },
+                "required": ["city"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate",
+            "description": "计算一个数学表达式。当用户需要做算术、比较数字大小时使用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "expression": {
+                        "type": "string",
+                        "description": "要计算的表达式，如 '20+15-5'",
+                    }
+                },
+                "required": ["expression"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "读取一个文本文件的内容。当用户要求查看某个文件里写了什么时使用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "文件路径，相对 02-tool-calling/ 目录，如 'notes.txt'",
+                    }
+                },
+                "required": ["path"],
+            },
+        },
+    },
 ]

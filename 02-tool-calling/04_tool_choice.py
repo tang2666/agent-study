@@ -93,18 +93,37 @@
     但要知道你换了一个端点。
   · 这一节照旧**不写循环**。
 
---- 待实测 ---
+--- 实测记录：四个取值跑下来（2026-09-29）---
 
-  自己跑完把这几条补上：
-  1. `none` 时模型怎么答"北京天气怎么样"？和"不传 tools"那次比，输出有区别吗？
-  2. 强制指定 `get_weather`，但问一个跟天气无关的问题，模型会怎么办？
-  3. 开 / 关 strict，多塞字段的比例实际差多少？（跑 20 次以上才有意义）
+  1. **四个取值分两类，分界线是"允许/禁止"还是"强制"：**
+
+         auto / none          → 让不让调，思考模式下**都支持**
+         required / 指定函数   → 逼它调，思考模式下**都 400**
+
+     所以"关思考"不是可选操作，是后两个用法的**前提**。注意方向：
+     不是思考模式被禁，是**这个参数组合服务端不支持**。
+
+  2. **`none` 不会 400。** 正常返回，`finish_reason="stop"`、`tool_calls=0`，
+     模型给了一段纯文本："我无法实时获取北京当前天气，所以不能给你准确的
+     '此刻'温度……建议你打开手机自带天气 App / 中国天气网 / 墨迹天气"。
+     全程**不提**工具的存在 —— 它看得见 `get_weather` 的 schema，但被禁止调用，
+     于是走了"我查不了"这条路。
+
+  3. 两遍对照（`TOOL_CHOICE_CASES` 的第三个字段全 False → 全 True）：
+     `required` 和"指定函数"从 400 变成 `finish_reason="tool_calls"`、
+     都拿到 1 个 `get_weather({"city": "北京"})`。
+
+  4. 还没做：**`none` vs 不传 `tools`** 的输出对比（第 1 条设想）、
+     **强制指定 `get_weather` 但问无关问题**（第 2 条设想）、
+     **strict 开关的多塞字段比例**（第 3 条设想，要跑 20 次以上）。
 
 --- 你要做的 ---
 
   实现 main()：把四种取值都跑一遍，把 400 那两次的报错原文也打印出来
   （别 catch 掉就完事 —— 你要看清它长什么样）。
 """
+
+from openai import BadRequestError
 
 from config import MODEL, client
 from tools import TOOLS
@@ -125,13 +144,48 @@ TOOL_CHOICE_CASES = [
 ]
 
 
+def probe(label: str, choice: object, disable_thinking: bool) -> None:
+    """跑一个 tool_choice 取值，**成功和 400 都原样打印**。
+
+    这里刻意只 catch `BadRequestError`：400 是这一节要看清的主角，
+    所以把它逮住打印；其他异常（网络断了之类）照旧往上抛，别一起吞了。
+
+    `disable_thinking` 决定 extra_body 传什么 —— 传 disabled 是真的关掉，
+    传 enabled 只是把"本来默认就开着"写明白（见 01 的实测记录 2）。
+    """
+    extra_body = {"thinking": {"type": "disabled" if disable_thinking else "enabled"}}
+
+    try:
+        resp = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": QUESTION}],
+            tools=TOOLS,
+            tool_choice=choice,
+            extra_body=extra_body,
+        )
+    except BadRequestError as e:
+        print(f"  ✗ 400 {e}")
+        return
+
+    msg = resp.choices[0].message
+    n = len(msg.tool_calls) if msg.tool_calls else 0
+    print(f"  finish_reason={resp.choices[0].finish_reason}  tool_calls={n}")
+    for c in msg.tool_calls or []:
+        print(f"    → {c.function.name}({c.function.arguments})")
+    if msg.content:
+        print(f"    content={msg.content[:100]!r}")
+
+
 def main() -> None:
     """把 `tool_choice` 的几种取值各跑一次，对比输出。
 
-    先按原样跑，看 required / 指定函数那两条怎么 400；
+    先按原样跑（三条都不关思考），看 required / 指定函数那两条怎么 400；
     再把它们的"关思考"改成 True 跑第二遍。两次的输出都要留着对比。
     """
-    raise NotImplementedError
+    for label, choice, disable_thinking in TOOL_CHOICE_CASES:
+        thinking = "关思考" if disable_thinking else "思考开"
+        print(f"\n=== {label} | {thinking} ===")
+        probe(label, choice, disable_thinking)
 
 
 if __name__ == "__main__":

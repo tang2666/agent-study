@@ -86,16 +86,33 @@
   · **`read_file` 的路径要做限制。** 是模型在决定读哪个文件，而你负责真的去读。
     这一节正好让你体会：`tools` 里放什么工具，等于给了模型什么权限。
 
---- 待实测（跑完把观察填进来）---
+--- 实测记录（2026-09-29）---
 
-  1. `read_file` 传一个不存在的路径，模型第一次会怎么反应？换路径还是放弃？
+  1. **模型大多数情况不会重试。** 同一组消息（发回去的 content 就是
+     `"失败了"`）原样连发 6 次，只有 **2 次**在第二轮发起了新的 tool_calls，
+     其余 4 次直接 `finish_reason="stop"`、用文本告诉用户读不到。
+     另一组 6 次（第二轮额外带 `reasoning_effort="high"`）是 1/6 ——
+     两组差别在噪声范围内，**reasoning_effort 不是原因**。
 
-  2. 换成"只写'失败了'"的简略版本，同样的路径，模型反应有区别吗？
+     → 结论：**"让模型自己从工具失败里恢复"是靠不住的**，它约 3/4 的时候
+       根本不试。容错得做在**代码**里（多轮循环、重试策略、步数上限），
+       那正是第 3 章的事。这是本节最值钱的一条。
 
-  3. 给一个**永久失败**的工具（比如不论传什么都抛异常），模型连试几次会放弃？
-     它是识趣地告诉用户，还是一直换参数瞎试？
+  2. **错误文本详细 vs 简略，看不出稳定差别。** `"失败了"` / 异常原文 /
+     "详细 + 列出目录下可读文件" 三种各跑了几次，重试与否都在小样本里摇摆，
+     没有哪一条稳定地决定它重不重试。**别拿单次观察当规律** —— 这条自己也适用：
+     一度看到"零信息 3/3 重试、列出文件 3/3 放弃"，加大样本后全被推翻。
 
-  4. 故意把某个工具的 description 写歪 / 让它参数对不上，看模型能不能自己发现。
+  3. **一旦它决定重试，是"换个参数形式再探"，不是重复同一个调用。**
+     例如第一轮传 `"02-tool-calling/不存在的文件.txt"`（照抄用户原话），
+     第二轮换成 `"不存在的文件.txt"`（按 description 的约定去掉目录前缀）。
+
+  4. **它不会编造内容。** 拿到错误后它的回复明确写了"我不想凭空猜测然后给你
+     一个编造的答案"，并列出几个可能的方向反问用户。错误信息如实发回去，
+     它就如实汇报 —— 这条比"重试率"更让人放心。
+
+  5. 还没做：**永久失败的工具**（第 3 条设想）、**故意写歪 description**
+     （第 4 条设想）。这两条留给自己跑。
 
 --- 你要做的 ---
 
@@ -113,13 +130,80 @@ from tools import TOOLS
 QUESTION = "帮我读一下 02-tool-calling/不存在的文件.txt 里写了什么"
 
 
+def run_tool(call) -> str:
+    """执行一个 tool_call，把**任何**失败都变成一段错误文本返回，绝不往上抛。
+
+    三种失败发生在三个不同位置，所以分三层兜：
+
+        ① 参数不是合法 JSON        → json.loads 那一步炸
+        ② 工具名不存在 / 参数对不上 → 查表那一步炸
+        ③ 工具自己抛异常            → 真正执行那一步炸
+
+    注意 ① ② 发生在**工具被调用之前** —— 工具还没跑起来，它当然兜不住，
+    只能由这一层管。三种最后都归一成"一段文本"，配原样的 tool_call_id 发回去：
+    OpenAI 格式里没有 is_error 字段，所谓"工具失败"就是 content 里写了错误信息。
+
+    内层那个宽 catch 是**故意**的（根 README 约定 6 的例外）：参数是模型生成的，
+    穷举不了它会怎么把函数打爆。但绝不吞掉 —— 异常类型和信息要原样带进 content，
+    模型才能据此决定下一步（换路径重试 / 换工具 / 直接告诉你）。
+    """
+    try:
+        args = json.loads(call.function.arguments)
+    except json.JSONDecodeError as e:
+        return f"参数不是合法 JSON：{e}"
+
+    # 用 get 不用 []：模型偶尔会幻觉出没定义过的工具名，别让它变成 KeyError。
+    fn = EXECUTORS.get(call.function.name)
+    if fn is None:
+        return f"没有名为 {call.function.name} 的工具"
+
+    try:
+        return fn(**args)
+    except Exception as e:
+        return f"工具执行失败：{type(e).__name__}: {e}"
+
+
 def main() -> None:
     """工具失败 → 把错误当结果发回去 → 观察模型的反应。
 
-    先只做一次往返（跟 01 一样），看模型收到错误后会不会自己再试一次；
-    如果它再试，你**手动**再走一轮，别写循环。
+    只做一次往返（跟 01 一样），看模型收到错误后会不会自己再试一次；
+    如果它再试，**手动**再走一轮，别写循环 —— 步数上限是第 3 章的事。
+
+    想做"详细版 vs 简略版"的对照实验，就把 `run_tool` 最后那行 return
+    改成 `return "失败了"` 再跑一遍，对比模型的反应。
     """
-    raise NotImplementedError
+    messages = []
+    messages.append({"role": "user", "content": QUESTION})
+
+    resp = client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        tools=TOOLS,
+        reasoning_effort="high",
+        extra_body={"thinking": {"type": "enabled"}},
+    )
+    msg = resp.choices[0].message
+    print(msg.model_dump_json(indent=2))
+    print(resp.choices[0].finish_reason)
+
+    messages.append(msg)
+
+    # 这一轮模型要调几个工具就处理几个 —— 失败也是"一条正常的结果消息"。
+    for call in msg.tool_calls or []:
+        result = run_tool(call)
+        print(f"→ {call.function.name} 的结果：{result}")
+        messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
+
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        tools=TOOLS,
+        reasoning_effort="high",
+        extra_body={"thinking": {"type": "enabled"}},
+    )
+    msg = response.choices[0].message
+    print(msg.model_dump_json(indent=2))
+    print(response.choices[0].finish_reason)
 
 
 if __name__ == "__main__":

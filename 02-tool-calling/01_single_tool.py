@@ -84,7 +84,8 @@
      第二次请求（带了工具结果）回来才是 `"stop"`。
 
   2. 思考模式**默认就是开的** —— 工具那一轮的 `msg` 上 `reasoning_content`
-     有值（实测 65 字）。所以这一章默认是"边想边调工具"。
+     属性一定存在。但**内容可能是空串**：探针那次 65 字，正式跑这次是 `""`。
+     所以别假设它非空，取值时写 `getattr(msg, "reasoning_content", None) or ""`。
      想复现"不带思考的纯工具调用"，得显式传
      `extra_body={"thinking": {"type": "disabled"}}`。
 
@@ -115,8 +116,37 @@ def main() -> None:
     一共几条？谁在前谁在后？每条的 role 分别是什么？
     画对了再写代码，比边写边试快得多。
     """
-    raise NotImplementedError
+    messages=[]
+    messages.append({"role":"user","content":QUESTION})
+    resp = client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        tools=TOOLS,
+        reasoning_effort="high",
+        extra_body={"thinking": {"type": "enabled"}},
+    )
+    msg = resp.choices[0].message
+    print(msg.model_dump_json(indent=2))
+    print(resp.choices[0].finish_reason )
+
+    messages.append(msg)
+
+    call = msg.tool_calls[0]
+    name = call.function.name  # "get_weather"
+    args = json.loads(call.function.arguments)  # {"city": "北京"}
+    result=EXECUTORS[name](**args)
+    messages.append({"role":"tool","tool_call_id":call.id,"content":result})
 
 
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        tools=TOOLS,
+        reasoning_effort="high",
+        extra_body={"thinking": {"type": "enabled"}},
+    )
+    msg = response.choices[0].message
+    print(msg.model_dump_json(indent=2))
+    print(response.choices[0].finish_reason )
 if __name__ == "__main__":
     main()

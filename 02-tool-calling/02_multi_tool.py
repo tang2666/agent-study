@@ -77,6 +77,8 @@
 """
 
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 from config import MODEL, client
 from executors import EXECUTORS
@@ -88,14 +90,75 @@ from tools import TOOLS
 QUESTION = "北京和上海现在天气怎么样？"
 
 
+def run_one(tool_call) -> tuple[str, str]:
+    """执行**一个** tool_call，返回 (tool_call_id, 结果字符串)。
+
+    为什么要拆成单独一个函数？因为它要被丢进线程池、在**别的线程**里跑。
+    在这种函数里不能碰 `messages` —— 多个线程同时 append 一个 list 是竞态，
+    顺序和内容都可能乱。所以它只干一件事：给我一个调用，还你一个结果。
+    往 `messages` 里塞，是主线程的事。
+
+    这里能安全并发，根本原因是这三个 executor **没有共享可变状态**：
+    它们只读自己的入参、返回一个字符串。带共享状态的函数不能这么扔进线程池。
+
+    注意：这里没做错误处理，工具一抛异常整个 `list(pool.map(...))` 就会炸。
+    把失败变成"发给模型的错误结果"是 03 章的事。
+    """
+    args = json.loads(tool_call.function.arguments)
+    return tool_call.id, EXECUTORS[tool_call.function.name](**args)
+
+
 def main() -> None:
     """跑一次并行工具调用，确认结果消息的条数 == tool_calls 的条数。
 
     先在纸上想清楚：如果这一轮有 2 个 tool_calls，`messages` 最终会比
     01 那种单工具的情况多几条？
     """
-    raise NotImplementedError
+    messages = []
+    messages.append({"role": "user", "content": QUESTION})
+    resp = client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        tools=TOOLS,
+        reasoning_effort="high",
+        extra_body={"thinking": {"type": "enabled"}},
+    )
+    msg = resp.choices[0].message
+    print(msg.model_dump_json(indent=2))
+    print(resp.choices[0].finish_reason)
+    messages.append(msg)
 
+    # 这一轮模型要调几个工具。先判空 —— 模型如果直接给了答案，
+    # tool_calls 会是 None，对 None 迭代直接 TypeError。
+    calls = msg.tool_calls or []
+    print(f"这一轮有 {len(calls)} 个 tool_calls")
 
+    started = time.perf_counter()
+    # pool.map 的关键性质：**返回顺序 == 输入顺序**，跟谁先跑完无关。
+    # 所以 results 和 calls 是一一对应的，顺序不会乱。
+    # `with` 离开时自动关池并等所有线程结束（相当于 join），不用手动 shutdown。
+    with ThreadPoolExecutor() as pool:
+        results = list(pool.map(run_one, calls))
+    print(f"{len(calls)} 个工具执行完，耗时 {time.perf_counter() - started:.3f}s")
+
+    # append 的顺序按 calls 的原始顺序来 —— 结果顺序虽然不影响 id 配对，
+    # 但保持稳定顺序，打印出来好看，也少一个变量。
+    for call_id, result in results:
+        messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
+
+    # 条数对账：1 条 user + 1 条 assistant + N 条 tool。
+    # 这就是本节验收标准里"确认结果消息条数 == tool_calls 条数"那一条。
+    print(f"messages 现在 {len(messages)} 条（1 user + 1 assistant + {len(calls)} tool）")
+
+    response=client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        tools=TOOLS,
+        reasoning_effort="high",
+        extra_body={"thinking": {"type": "enabled"}},
+    )
+    msg = response.choices[0].message
+    print(msg.model_dump_json(indent=2))
+    print(response.choices[0].finish_reason)
 if __name__ == "__main__":
     main()
